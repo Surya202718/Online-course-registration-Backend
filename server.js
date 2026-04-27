@@ -9,99 +9,87 @@ app.use(express.json());
 // Auth Routes
 app.post('/api/auth/signup', (req, res) => {
   const { username, password, name, email, role } = req.body;
-  db.run('INSERT INTO users (username, password, name, email, role) VALUES (?, ?, ?, ?, ?)', 
-    [username, password, name, email, role], 
-    function(err) {
-      if (err) {
-        if (err.message.includes('UNIQUE constraint failed')) {
-          return res.status(400).json({ error: 'Username already exists' });
-        }
-        return res.status(500).json({ error: err.message });
-      }
-      res.status(201).json({ id: this.lastID, username, name, email, role });
-  });
+  try {
+    const result = db.prepare('INSERT INTO users (username, password, name, email, role) VALUES (?, ?, ?, ?, ?)').run(username, password, name, email, role);
+    res.status(201).json({ id: result.lastInsertRowid, username, name, email, role });
+  } catch (err) {
+    if (err.message.includes('UNIQUE constraint failed')) {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/auth/login', (req, res) => {
   const { username, password, role } = req.body;
-  db.get('SELECT * FROM users WHERE username = ? AND password = ? AND role = ?', [username, password, role], (err, user) => {
-    if (err) return res.status(500).json({ error: err.message });
+  try {
+    const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ? AND role = ?').get(username, password, role);
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
     
     // If student, populate enrolledCourses
     if (role === 'student') {
-      db.all('SELECT c.* FROM courses c JOIN enrollments e ON c.id = e.course_id WHERE e.user_id = ?', [user.id], (err, courses) => {
-        user.enrolledCourses = courses || [];
-        res.json(user);
-      });
-    } else {
-      res.json(user);
+      const courses = db.prepare('SELECT c.* FROM courses c JOIN enrollments e ON c.id = e.course_id WHERE e.user_id = ?').all(user.id);
+      user.enrolledCourses = courses || [];
     }
-  });
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Courses Routes
 app.get('/api/courses', (req, res) => {
-  db.all('SELECT * FROM courses', [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+  try {
+    const rows = db.prepare('SELECT * FROM courses').all();
     res.json(rows);
-  });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/courses', (req, res) => {
   const { code, name, credits, faculty, department, capacity, day, time, room, description } = req.body;
-  db.run(`INSERT INTO courses (code, name, credits, faculty, department, capacity, day, time, room, description) 
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, 
-    [code, name, credits, faculty, department, capacity, day, time, room, description],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: this.lastID, ...req.body, enrolled: 0 });
-    }
-  );
+  try {
+    const result = db.prepare('INSERT INTO courses (code, name, credits, faculty, department, capacity, day, time, room, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(code, name, credits, faculty, department, capacity, day, time, room, description);
+    res.status(201).json({ id: result.lastInsertRowid, ...req.body, enrolled: 0 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.put('/api/courses/:id', (req, res) => {
   const { code, name, credits, faculty, department, capacity, day, time, room, description } = req.body;
-  db.run(`UPDATE courses 
-          SET code = ?, name = ?, credits = ?, faculty = ?, department = ?, capacity = ?, day = ?, time = ?, room = ?, description = ?
-          WHERE id = ?`,
-    [code, name, credits, faculty, department, capacity, day, time, room, description, req.params.id],
-    function(err) {
-      if (err) return res.status(500).json({ error: err.message });
-      if (this.changes === 0) return res.status(404).json({ error: 'Course not found' });
-      res.json({ id: Number(req.params.id), ...req.body });
-    }
-  );
+  try {
+    const result = db.prepare('UPDATE courses SET code = ?, name = ?, credits = ?, faculty = ?, department = ?, capacity = ?, day = ?, time = ?, room = ?, description = ? WHERE id = ?').run(code, name, credits, faculty, department, capacity, day, time, room, description, req.params.id);
+    if (result.changes === 0) return res.status(404).json({ error: 'Course not found' });
+    res.json({ id: Number(req.params.id), ...req.body });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.delete('/api/courses/:id', (req, res) => {
-  db.run('DELETE FROM courses WHERE id = ?', [req.params.id], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    // Cleanup enrollments
-    db.run('DELETE FROM enrollments WHERE course_id = ?', [req.params.id]);
+  try {
+    db.prepare('DELETE FROM enrollments WHERE course_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM courses WHERE id = ?').run(req.params.id);
     res.status(204).send();
-  });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Admin stats: get all students
 app.get('/api/users', (req, res) => {
-  db.all('SELECT id, username, name, email, role FROM users WHERE role = "student"', [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    
-    // We optionally could populate enrolledCourses for all students if needed
-    let completed = 0;
-    if (rows.length === 0) return res.json([]);
-    
+  try {
+    const rows = db.prepare('SELECT id, username, name, email, role FROM users WHERE role = "student"').all();
     rows.forEach(user => {
-      db.all('SELECT c.* FROM courses c JOIN enrollments e ON c.id = e.course_id WHERE e.user_id = ?', [user.id], (err, courses) => {
-        user.enrolledCourses = courses || [];
-        completed++;
-        if (completed === rows.length) {
-          res.json(rows);
-        }
-      });
+      const courses = db.prepare('SELECT c.* FROM courses c JOIN enrollments e ON c.id = e.course_id WHERE e.user_id = ?').all(user.id);
+      user.enrolledCourses = courses || [];
     });
-  });
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Enrollment Routes
@@ -109,33 +97,36 @@ app.post('/api/students/:id/enroll', (req, res) => {
   const userId = req.params.id;
   const { courseId } = req.body;
 
-  db.get('SELECT * FROM courses WHERE id = ?', [courseId], (err, course) => {
-    if (err) return res.status(500).json({ error: err.message });
+  try {
+    const course = db.prepare('SELECT * FROM courses WHERE id = ?').get(courseId);
     if (!course) return res.status(404).json({ error: 'Course not found' });
     if (course.enrolled >= course.capacity) return res.status(400).json({ error: 'Course is full' });
 
-    db.run('INSERT INTO enrollments (user_id, course_id) VALUES (?, ?)', [userId, courseId], function(err) {
-      if (err) return res.status(400).json({ error: 'Already enrolled' });
-      
-      db.run('UPDATE courses SET enrolled = enrolled + 1 WHERE id = ?', [courseId], (err) => {
-        res.json({ success: true, course });
-      });
-    });
-  });
+    db.prepare('INSERT INTO enrollments (user_id, course_id) VALUES (?, ?)').run(userId, courseId);
+    db.prepare('UPDATE courses SET enrolled = enrolled + 1 WHERE id = ?').run(courseId);
+    res.json({ success: true, course });
+  } catch (err) {
+    if (err.message.includes('UNIQUE constraint failed')) {
+      res.status(400).json({ error: 'Already enrolled' });
+    } else {
+      res.status(500).json({ error: err.message });
+    }
+  }
 });
 
 app.post('/api/students/:id/drop', (req, res) => {
   const userId = req.params.id;
   const { courseId } = req.body;
 
-  db.run('DELETE FROM enrollments WHERE user_id = ? AND course_id = ?', [userId, courseId], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-    if (this.changes === 0) return res.status(400).json({ error: 'Not enrolled in this course' });
+  try {
+    const result = db.prepare('DELETE FROM enrollments WHERE user_id = ? AND course_id = ?').run(userId, courseId);
+    if (result.changes === 0) return res.status(400).json({ error: 'Not enrolled in this course' });
     
-    db.run('UPDATE courses SET enrolled = enrolled - 1 WHERE id = ? AND enrolled > 0', [courseId], (err) => {
-      res.json({ success: true });
-    });
-  });
+    db.prepare('UPDATE courses SET enrolled = enrolled - 1 WHERE id = ? AND enrolled > 0').run(courseId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 5000;
